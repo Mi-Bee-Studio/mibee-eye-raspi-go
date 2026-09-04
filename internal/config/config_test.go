@@ -475,8 +475,8 @@ func TestGB28181Config_Defaults(t *testing.T) {
 	if cfg.GB28181.SIPDomain != "3402000000" {
 		t.Errorf("GB28181.SIPDomain = %q, want %q", cfg.GB28181.SIPDomain, "3402000000")
 	}
-	if cfg.GB28181.Password != "12345678" {
-		t.Errorf("GB28181.Password = %q, want %q", cfg.GB28181.Password, "12345678")
+	if cfg.GB28181.Password != "" {
+		t.Errorf("GB28181.Password = %q, want empty (no default password)", cfg.GB28181.Password)
 	}
 	if cfg.GB28181.LocalSIPPort != 5060 {
 		t.Errorf("GB28181.LocalSIPPort = %d, want 5060", cfg.GB28181.LocalSIPPort)
@@ -489,6 +489,26 @@ func TestGB28181Config_Defaults(t *testing.T) {
 	}
 	if cfg.GB28181.HeartbeatTimeoutCount != 3 {
 		t.Errorf("GB28181.HeartbeatTimeoutCount = %d, want 3", cfg.GB28181.HeartbeatTimeoutCount)
+	}
+}
+
+func TestValidateGB28181PasswordRequired(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.GB28181.Enabled = true
+	cfg.GB28181.Password = ""
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for empty gb28181 password when enabled, got nil")
+	}
+	if !strings.Contains(err.Error(), "gb28181.password") {
+		t.Errorf("error should mention 'gb28181.password', got: %v", err)
+	}
+
+	// Disabled GB28181 with an empty password stays valid — no credential
+	// is needed when the protocol is off.
+	cfg.GB28181.Enabled = false
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("disabled gb28181 with empty password should be valid, got: %v", err)
 	}
 }
 

@@ -242,7 +242,7 @@ func DefaultConfig() *Config {
 			DeviceID:              "34020000001320000001",
 			ChannelID:             "34020000001320000001",
 			SIPDomain:             "3402000000",
-			Password:              "12345678",
+			Password:              "",
 			LocalSIPPort:          5060,
 			RegisterIntervalSecs:  60,
 			HeartbeatIntervalSecs: 60,
@@ -480,6 +480,9 @@ func (c *Config) Validate() error {
 		c.GB28181.Transport = "udp"
 	default:
 		return fmt.Errorf("config.gb28181.transport: %w", errInvalidTransport)
+	}
+	if c.GB28181.Enabled && c.GB28181.Password == "" {
+		return fmt.Errorf("config.gb28181.password: must not be empty when gb28181.enabled (set gb28181.password or MIBEE_EYE_GB28181_PASSWORD)")
 	}
 	if c.Recording.SegmentSecs < 60 {
 		c.Recording.SegmentSecs = 60

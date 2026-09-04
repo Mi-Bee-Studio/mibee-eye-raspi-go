@@ -185,8 +185,9 @@ gb28181:
   # GB28181 SIP domain
   sip_domain: "3402000000"
 
-  # SIP authentication password
-  password: "12345678"
+  # SIP authentication password — REQUIRED when gb28181.enabled
+  # (the service refuses to start with an empty password; no default)
+  password: ""
 
   # Local SIP listening port
   local_sip_port: 5060
