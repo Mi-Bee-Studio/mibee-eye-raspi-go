@@ -22,6 +22,24 @@ type ModelSpec struct {
 var Registry = []ModelSpec{
 	{"nanodet-plus-m-320", "nanodet", 320, "/var/lib/mibee-eye/models/nanodet-m.onnx"},
 	{"nanodet-plus-m-416", "nanodet", 416, "/var/lib/mibee-eye/models/nanodet-m-416.onnx"},
+	{"yolox-nano-416", "yolox", 416, "/var/lib/mibee-eye/models/yolox-nano.onnx"},
+}
+
+// family selects the pre/post-processing pair for a model.
+type family int
+
+const (
+	familyNanoDet family = iota
+	familyYolox
+)
+
+// familyOf maps a registry family string; unknown values fall back to
+// NanoDet (the escape hatch predates families).
+func familyOf(s string) family {
+	if s == "yolox" {
+		return familyYolox
+	}
+	return familyNanoDet
 }
 
 // DefaultModelPath is the registry default for model_path overrides.

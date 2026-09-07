@@ -149,11 +149,17 @@ func TestAIModelsListsRegistry(t *testing.T) {
 	for _, m := range models {
 		e := m.(map[string]interface{})
 		ids[e["id"].(string)] = true
-		if e["source"] != "builtin" || e["family"] != "nanodet" {
+		if e["source"] != "builtin" {
 			t.Fatalf("entry = %v", e)
 		}
+		// Families must be decoders this build actually implements.
+		switch e["family"] {
+		case "nanodet", "yolox":
+		default:
+			t.Fatalf("unknown family in entry = %v", e)
+		}
 	}
-	if !ids["nanodet-plus-m-320"] || !ids["nanodet-plus-m-416"] {
+	if !ids["nanodet-plus-m-320"] || !ids["nanodet-plus-m-416"] || !ids["yolox-nano-416"] {
 		t.Fatalf("registry ids missing: %v", ids)
 	}
 }

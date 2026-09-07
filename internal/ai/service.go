@@ -47,6 +47,11 @@ func NewService(opts Options, hub *h264.AUHub, newDetector func(Options) (Detect
 			"model", opts.Model)
 		return nil
 	}
+	if !model.Custom {
+		opts.Model = model.ID
+		opts.ModelPath = model.Path
+		opts.Family = model.Family
+	}
 	detector, err := newDetector(opts)
 	if err != nil {
 		slog.Warn("ai: detector unavailable, AI stays disabled (fail-open)", "error", err)
@@ -101,6 +106,7 @@ func (s *Service) ActivateModel(id string) error {
 	opts := s.opts
 	opts.Model = id
 	opts.ModelPath = spec.Path
+	opts.Family = spec.Family
 	detector, err := s.newDetector(opts)
 	if err != nil {
 		return fmt.Errorf("loading model %s: %w", id, err)

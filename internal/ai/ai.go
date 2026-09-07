@@ -54,6 +54,9 @@ type Options struct {
 	// ModelPath points at the NanoDet ONNX model. A non-default value
 	// overrides the registry id (custom deployments).
 	ModelPath string
+	// Family is the decoder family of Model ("nanodet" | "yolox"); the
+	// service derives it from the registry when resolving models.
+	Family string
 	// OnnxLibPath points at libonnxruntime.so (empty = library search
 	// path / system default).
 	OnnxLibPath string
@@ -74,6 +77,9 @@ func (o *Options) withDefaults() Options {
 	}
 	if c.ModelPath == "" {
 		c.ModelPath = "/var/lib/mibee-eye/models/nanodet-m.onnx"
+	}
+	if c.Family == "" {
+		c.Family = "nanodet"
 	}
 	if c.ConfidenceThreshold <= 0 {
 		c.ConfidenceThreshold = 0.35
