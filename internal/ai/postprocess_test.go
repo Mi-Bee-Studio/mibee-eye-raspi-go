@@ -39,7 +39,7 @@ func TestScaleClampsToFrameBounds(t *testing.T) {
 // (point 820), one-hot regression at distances (2, 3, 4, 5) → bbox
 // (144, 136, 192, 200).
 func syntheticOutputWithDetection() []float32 {
-	output := make([]float32, numPoints*numChannels)
+	output := make([]float32, gridForInput(320).points*numChannels)
 	base := (20*40 + 20) * numChannels
 	output[base] = 0.9
 	for class := 1; class < numClasses; class++ {
@@ -52,7 +52,7 @@ func syntheticOutputWithDetection() []float32 {
 }
 
 func TestSyntheticDetectionDecodesBBoxWithin2px(t *testing.T) {
-	detections, err := postprocess(syntheticOutputWithDetection(), 0.4)
+	detections, err := postprocess(syntheticOutputWithDetection(), gridForInput(320), 0.4)
 	if err != nil {
 		t.Fatalf("postprocess: %v", err)
 	}
@@ -75,8 +75,8 @@ func TestSyntheticDetectionDecodesBBoxWithin2px(t *testing.T) {
 }
 
 func TestAllZeroOutputYieldsNoDetections(t *testing.T) {
-	output := make([]float32, numPoints*numChannels)
-	detections, err := postprocess(output, 0.4)
+	output := make([]float32, gridForInput(320).points*numChannels)
+	detections, err := postprocess(output, gridForInput(320), 0.4)
 	if err != nil {
 		t.Fatalf("postprocess: %v", err)
 	}
@@ -86,9 +86,75 @@ func TestAllZeroOutputYieldsNoDetections(t *testing.T) {
 }
 
 func TestShortOutputReturnsError(t *testing.T) {
-	output := make([]float32, numPoints*numChannels-1)
-	if _, err := postprocess(output, 0.4); err == nil {
+	output := make([]float32, gridForInput(320).points*numChannels-1)
+	if _, err := postprocess(output, gridForInput(320), 0.4); err == nil {
 		t.Fatal("short output must be rejected")
+	}
+}
+
+// The nanodet-plus-m_416.onnx export emits [1, 3598, 112]:
+// ceil(416/8)² + ceil(416/16)² + ceil(416/32)² + ceil(416/64)²
+// = 52² + 26² + 13² + 7² = 3598.
+func TestGridForInput416MatchesOnnxExport(t *testing.T) {
+	grid := gridForInput(416)
+	if grid.points != 3598 {
+		t.Fatalf("points = %d, want 3598", grid.points)
+	}
+	for _, c := range []struct {
+		idx                    int
+		level, gridX, gridY    int
+		stride                 uint32
+	}{
+		{0, 0, 0, 0, 8},
+		{52*52 - 1, 0, 51, 51, 8},
+		{52 * 52, 1, 0, 0, 16},
+		{52*52 + 26*26, 2, 0, 0, 32},
+		{52*52 + 26*26 + 13*13, 3, 0, 0, 64},
+		{3597, 3, 6, 6, 64},
+	} {
+		level, stride, gx, gy := grid.coords(c.idx)
+		if level != c.level || stride != c.stride || gx != c.gridX || gy != c.gridY {
+			t.Errorf("coords(%d) = (%d,%d,%d,%d), want (%d,%d,%d,%d)",
+				c.idx, level, stride, gx, gy, c.level, c.stride, c.gridX, c.gridY)
+		}
+	}
+
+	// A 320-sized tensor must NOT decode as a 416 grid (and vice versa).
+	if _, err := postprocess(make([]float32, 2125*numChannels), grid, 0.4); err == nil {
+		t.Fatal("320-length output must be rejected for a 416 grid")
+	}
+	if _, err := postprocess(make([]float32, 3598*numChannels), grid, 0.4); err != nil {
+		t.Fatalf("416-length output must decode: %v", err)
+	}
+}
+
+// Same one-hot construction on the 416 grid's stride-8 level:
+// grid (x=30, y=25) → point 25*52+30; distances (2,3,4,5)
+// → bbox ((30-2)*8, (25-3)*8, (30+4)*8-(30-2)*8, (25+5)*8-(25-3)*8)
+// = (224, 176, 50, 64).
+func TestSyntheticDetectionDecodesOn416Grid(t *testing.T) {
+	grid := gridForInput(416)
+	output := make([]float32, grid.points*numChannels)
+	base := (25*52 + 30) * numChannels
+	output[base] = 0.9
+	for class := 1; class < numClasses; class++ {
+		output[base+class] = 0.01
+	}
+	for side, distance := range []int{2, 3, 4, 5} {
+		output[base+numClasses+side*numBins+distance] = 20.0
+	}
+	detections, err := postprocess(output, grid, 0.4)
+	if err != nil {
+		t.Fatalf("postprocess: %v", err)
+	}
+	if len(detections) != 1 {
+		t.Fatalf("detections = %d, want 1", len(detections))
+	}
+	for i, want := range []int{224, 176, 50, 64} {
+		got := int(detections[0].BBox[i])
+		if abs(got-want) > 2 {
+			t.Errorf("bbox[%d] = %d, want ≈%d", i, got, want)
+		}
 	}
 }
 
@@ -106,10 +172,11 @@ func TestGridCoords(t *testing.T) {
 		{2100, 3, 0, 0, 64},
 		{2124, 3, 4, 4, 64},
 	}
+	grid := gridForInput(320)
 	for _, c := range cases {
-		level, stride, gx, gy := gridCoords(c.idx)
+		level, stride, gx, gy := grid.coords(c.idx)
 		if level != c.level || stride != c.stride || gx != c.gridX || gy != c.y {
-			t.Errorf("gridCoords(%d) = (%d,%d,%d,%d), want (%d,%d,%d,%d)",
+			t.Errorf("coords(%d) = (%d,%d,%d,%d), want (%d,%d,%d,%d)",
 				c.idx, level, stride, gx, gy, c.level, c.stride, c.gridX, c.y)
 		}
 	}

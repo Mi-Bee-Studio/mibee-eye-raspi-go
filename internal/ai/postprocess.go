@@ -14,9 +14,10 @@ package ai
 //  3. Bbox — x1 = (gridX - l)*stride, … clamped to the input frame.
 //  4. NMS — per-class non-maximum suppression at IoU 0.5.
 //
-// Model output layout: [1, 2125, 112] (point-major) — 2125 points =
-// 40² + 20² + 10² + 5² at strides [8, 16, 32, 64]; 112 channels = 80 COCO
-// classes + 32 regression.
+// Model output layout: [1, points, 112] (point-major) — `points` follows
+// the model input size (see gridLayout): the 320 export emits 2125 points
+// (40² + 20² + 10² + 5² at strides [8, 16, 32, 64]), the 416 export 3598
+// (52² + 26² + 13² + 7²); 112 channels = 80 COCO classes + 32 regression.
 
 import (
 	"fmt"
@@ -25,21 +26,55 @@ import (
 )
 
 const (
-	numClasses     = 80
-	regMax         = 7
-	numBins        = regMax + 1
-	numRegression  = 4 * numBins
-	numChannels    = numClasses + numRegression
-	inputSize      = 320
-	numPoints      = 2125
+	numClasses      = 80
+	regMax          = 7
+	numBins         = regMax + 1
+	numRegression   = 4 * numBins
+	numChannels     = numClasses + numRegression
 	nmsIOUThreshold = 0.5
 )
 
-var (
-	strides      = [4]uint32{8, 16, 32, 64}
-	gridSizes    = [4]int{40, 20, 10, 5}
-	levelOffsets = [4]int{0, 1600, 2000, 2100}
-)
+var strides = [4]uint32{8, 16, 32, 64}
+
+// gridLayout is the FPN geometry derived from the model's (square) input
+// size: each stride level contributes ceil(input/stride)² points, ordered
+// level-major (stride 8 first) and row-major within a level — matching
+// NanoDet's generate_grid_center_priors. Deriving the layout from the
+// input size (instead of hardcoding the 320 export) is what lets one
+// decoder serve every same-family model (320, 416, …).
+type gridLayout struct {
+	input   uint32
+	sizes   [4]int
+	offsets [4]int
+	points  int
+}
+
+func gridForInput(input uint32) gridLayout {
+	var g gridLayout
+	g.input = input
+	for i, s := range strides {
+		g.sizes[i] = (int(input) + int(s) - 1) / int(s)
+	}
+	for i := 1; i < len(g.offsets); i++ {
+		g.offsets[i] = g.offsets[i-1] + g.sizes[i-1]*g.sizes[i-1]
+	}
+	g.points = g.offsets[3] + g.sizes[3]*g.sizes[3]
+	return g
+}
+
+// coords maps a flat point index to its (level, stride, gridX, gridY).
+func (g gridLayout) coords(pointIdx int) (level int, stride uint32, gridX, gridY int) {
+	level = 0
+	for l := len(g.offsets) - 1; l >= 0; l-- {
+		if g.offsets[l] <= pointIdx {
+			level = l
+			break
+		}
+	}
+	local := pointIdx - g.offsets[level]
+	gridW := g.sizes[level]
+	return level, strides[level], local % gridW, local / gridW
+}
 
 // cocoLabels are the COCO 80-class labels in model output order.
 var cocoLabels = [numClasses]string{
@@ -66,19 +101,21 @@ type candidate struct {
 	x2, y2     float32
 }
 
-// postprocess decodes the flat [1, 2125, 112] output tensor into
-// detections. confidenceThreshold is the pre-NMS filter applied to the
-// (already sigmoid'd) class scores.
-func postprocess(output []float32, confidenceThreshold float32) ([]Detection, error) {
-	if len(output) != numPoints*numChannels {
-		return nil, fmt.Errorf("ai: unexpected ONNX output length: got %d, expected %d (%d points × %d channels)",
-			len(output), numPoints*numChannels, numPoints, numChannels)
+// postprocess decodes the flat [1, points, 112] output tensor into
+// detections; the grid layout follows the model's actual input size.
+// confidenceThreshold is the pre-NMS filter applied to the (already
+// sigmoid'd) class scores.
+func postprocess(output []float32, grid gridLayout, confidenceThreshold float32) ([]Detection, error) {
+	expected := grid.points * numChannels
+	if len(output) != expected {
+		return nil, fmt.Errorf("ai: unexpected ONNX output length: got %d, expected %d (%d points × %d channels for input %d)",
+			len(output), expected, grid.points, numChannels, grid.input)
 	}
 
 	var candidates []candidate
-	for pointIdx := 0; pointIdx < numPoints; pointIdx++ {
+	for pointIdx := 0; pointIdx < grid.points; pointIdx++ {
 		point := output[pointIdx*numChannels : (pointIdx+1)*numChannels]
-		_, stride, gridX, gridY := gridCoords(pointIdx)
+		_, stride, gridX, gridY := grid.coords(pointIdx)
 
 		// Classification: argmax over the class channels.
 		label := 0
@@ -105,8 +142,8 @@ func postprocess(output []float32, confidenceThreshold float32) ([]Detection, er
 			confidence: confidence,
 			x1:         max32(x1, 0),
 			y1:         max32(y1, 0),
-			x2:         min32(x2, inputSize),
-			y2:         min32(y2, inputSize),
+			x2:         min32(x2, float32(grid.input)),
+			y2:         min32(y2, float32(grid.input)),
 		})
 	}
 
@@ -151,22 +188,6 @@ func scaleDetectionsToFrame(detections []Detection, modelW, modelH, frameW, fram
 		detections[i].BBox = [4]uint32{x, y, w, h}
 	}
 	return detections
-}
-
-// gridCoords maps a flat point index to its (level, stride, gridX, gridY).
-// Points are ordered level-major (stride 8 first) and row-major within
-// each level (y outer, x inner).
-func gridCoords(pointIdx int) (level int, stride uint32, gridX, gridY int) {
-	level = 0
-	for l := len(levelOffsets) - 1; l >= 0; l-- {
-		if levelOffsets[l] <= pointIdx {
-			level = l
-			break
-		}
-	}
-	local := pointIdx - levelOffsets[level]
-	gridW := gridSizes[level]
-	return level, strides[level], local % gridW, local / gridW
 }
 
 // decodeDistances decodes the 4 box-side distances (l, t, r, b) from the

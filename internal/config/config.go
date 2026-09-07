@@ -137,7 +137,8 @@ type RecordingConfig struct {
 // otherwise the feature reports unavailable (fail-open).
 type AIConfig struct {
 	Enabled             bool    `yaml:"enabled"`              // master switch (default off)
-	ModelPath           string  `yaml:"model_path"`           // NanoDet ONNX model
+	Model               string  `yaml:"model"`                // registry id of the startup model (SPEC §4.6)
+	ModelPath           string  `yaml:"model_path"`           // NanoDet ONNX model (non-default overrides the registry id)
 	OnnxLibPath         string  `yaml:"onnx_lib_path"`        // libonnxruntime.so location
 	ConfidenceThreshold float32 `yaml:"confidence_threshold"` // report filter (0..1)
 	IntervalMs          uint64  `yaml:"interval_ms"`          // min spacing between inferences
@@ -258,6 +259,7 @@ func DefaultConfig() *Config {
 		},
 		AI: AIConfig{
 			Enabled:             false,
+			Model:               "nanodet-plus-m-320",
 			ModelPath:           "/var/lib/mibee-eye/models/nanodet-m.onnx",
 			OnnxLibPath:         "/usr/local/lib/libonnxruntime.so",
 			ConfidenceThreshold: 0.35,

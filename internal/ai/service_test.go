@@ -3,6 +3,9 @@ package ai
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -82,7 +85,8 @@ func TestRunLoopUpdatesSnapshotAndEvent(t *testing.T) {
 	}
 
 	snap := svc.Snapshot()
-	if snap.Model != "fake.onnx" || len(snap.Detections) != 1 {
+	// SPEC §4.6: the snapshot's model is the registry id, not the file name.
+	if snap.Model != "nanodet-plus-m-320" || len(snap.Detections) != 1 {
 		t.Fatalf("snapshot = %+v", snap)
 	}
 	if snap.Timestamp == 0 {
@@ -176,4 +180,141 @@ func mustJSON(t *testing.T, v interface{}) string {
 		t.Fatalf("marshal: %v", err)
 	}
 	return string(b)
+}
+
+// withTempModel416 points the 416 registry entry at a real temp file so
+// activation succeeds without /var/lib on the workstation, restoring the
+// original path afterwards.
+func withTempModel416(t *testing.T) {
+	t.Helper()
+	f := filepath.Join(t.TempDir(), "nanodet-m-416.onnx")
+	if err := os.WriteFile(f, []byte("onnx"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := Registry[1].Path
+	Registry[1].Path = f
+	t.Cleanup(func() { Registry[1].Path = old })
+}
+
+func TestActivateModelSwapsModelIDAndSnapshot(t *testing.T) {
+	withTempModel416(t)
+	svc := newSvc(t, Options{Enabled: true})
+	if svc.ModelID() != "nanodet-plus-m-320" {
+		t.Fatalf("startup model = %s", svc.ModelID())
+	}
+	if err := svc.ActivateModel("nanodet-plus-m-416"); err != nil {
+		t.Fatalf("activate: %v", err)
+	}
+	if svc.ModelID() != "nanodet-plus-m-416" {
+		t.Fatalf("active model = %s", svc.ModelID())
+	}
+	snap := svc.Snapshot()
+	if snap.Model != "nanodet-plus-m-416" {
+		t.Fatalf("snapshot model = %s", snap.Model)
+	}
+}
+
+func TestActivateModelUnknownIsError(t *testing.T) {
+	svc := newSvc(t, Options{Enabled: true})
+	err := svc.ActivateModel("yolo-9000")
+	if !errors.Is(err, ErrUnknownModel) {
+		t.Fatalf("err = %v, want ErrUnknownModel", err)
+	}
+	if svc.ModelID() != "nanodet-plus-m-320" {
+		t.Fatalf("model must be unchanged, got %s", svc.ModelID())
+	}
+}
+
+func TestActivateModelMissingFileIsUnavailable(t *testing.T) {
+	svc := newSvc(t, Options{Enabled: true})
+	// The real 416 path does not exist on the workstation.
+	err := svc.ActivateModel("nanodet-plus-m-416")
+	if !errors.Is(err, ErrModelUnavailable) {
+		t.Fatalf("err = %v, want ErrModelUnavailable", err)
+	}
+	if svc.ModelID() != "nanodet-plus-m-320" {
+		t.Fatalf("model must be unchanged, got %s", svc.ModelID())
+	}
+}
+
+func TestActivateModelLoadFailureRollsBack(t *testing.T) {
+	withTempModel416(t)
+	svc := NewService(Options{Enabled: true}, nil, func(o Options) (Detector, error) {
+		if o.Model == "nanodet-plus-m-416" {
+			return nil, errNotBuilt
+		}
+		return &fakeDetector{model: "fake.onnx"}, nil
+	})
+	if svc == nil {
+		t.Fatal("service must start with the working 320 factory")
+	}
+	if err := svc.ActivateModel("nanodet-plus-m-416"); err == nil {
+		t.Fatal("load failure must be an error")
+	}
+	if svc.ModelID() != "nanodet-plus-m-320" {
+		t.Fatalf("rollback must keep the old model, got %s", svc.ModelID())
+	}
+}
+
+func TestRunLoopUsesSwappedDetector(t *testing.T) {
+	withTempModel416(t)
+	first := &fakeDetector{model: "fake.onnx"}
+	calls := 0
+	svc := NewService(Options{Enabled: true, IntervalMs: 1}, nil, func(Options) (Detector, error) {
+		calls++
+		if calls == 1 {
+			return first, nil
+		}
+		return &fakeDetector{model: "fake-416.onnx"}, nil
+	})
+	if svc == nil {
+		t.Fatal("service must be active")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	frames := make(chan Frame)
+	go svc.runLoop(ctx, frames)
+	defer cancel()
+
+	frames <- Frame{Width: 4, Height: 4, Data: make([]byte, 48)}
+	// The inference result lands on the events channel — the happens-before
+	// edge that makes reading loop state race-free.
+	select {
+	case <-svc.Events():
+	case <-time.After(2 * time.Second):
+		t.Fatal("loop must run the first detector")
+	}
+
+	if err := svc.ActivateModel("nanodet-plus-m-416"); err != nil {
+		t.Fatalf("activate: %v", err)
+	}
+	if svc.currentDetector() == first {
+		t.Fatal("detector slot must hold a new instance after activation")
+	}
+}
+
+type closeableDetector struct {
+	fakeDetector
+	closed bool
+}
+
+func (c *closeableDetector) Close() { c.closed = true }
+
+func TestActivateModelClosesReplacedDetector(t *testing.T) {
+	withTempModel416(t)
+	first := &closeableDetector{fakeDetector: fakeDetector{model: "fake.onnx"}}
+	svc := NewService(Options{Enabled: true}, nil, func(Options) (Detector, error) {
+		return first, nil
+	})
+	if svc == nil {
+		t.Fatal("service must be active")
+	}
+	if first.closed {
+		t.Fatal("detector must not be closed before the swap")
+	}
+	if err := svc.ActivateModel("nanodet-plus-m-416"); err != nil {
+		t.Fatalf("activate: %v", err)
+	}
+	if !first.closed {
+		t.Fatal("replaced detector must be closed on hot-swap")
+	}
 }

@@ -16,6 +16,27 @@ import (
 // post-processing; the configured threshold filters the final results.
 const preNMSConfidence float32 = 0.05
 
+// ortInit guards ort.InitializeEnvironment: the ONNX Runtime global
+// environment may only be initialized ONCE per process — a second call
+// fails with "The onnxruntime has already been initialized", which would
+// break every hot-swap after the first (SPEC §4.6 activate).
+var (
+	ortOnce     sync.Once
+	ortInitErr  error
+	ortLibTried string
+)
+
+func initOnnxRuntime(libPath string) error {
+	ortOnce.Do(func() {
+		ortLibTried = libPath
+		if libPath != "" {
+			ort.SetSharedLibraryPath(libPath)
+		}
+		ortInitErr = ort.InitializeEnvironment()
+	})
+	return ortInitErr
+}
+
 // OrtDetector runs NanoDet inference through ONNX Runtime.
 type OrtDetector struct {
 	modelPath   string
@@ -25,15 +46,13 @@ type OrtDetector struct {
 	inputW, inputH uint32
 	outputShape ort.Shape
 	mu          sync.Mutex // session.Run is not safe for concurrent use
+	closed      bool
 }
 
 // newOrtDetector loads the model and prepares the session. The shared
 // library must be located before any onnxruntime call.
 func newOrtDetector(opts Options) (Detector, error) {
-	if opts.OnnxLibPath != "" {
-		ort.SetSharedLibraryPath(opts.OnnxLibPath)
-	}
-	if err := ort.InitializeEnvironment(); err != nil {
+	if err := initOnnxRuntime(opts.OnnxLibPath); err != nil {
 		return nil, fmt.Errorf("ai: initialize onnxruntime: %w", err)
 	}
 
@@ -51,9 +70,15 @@ func newOrtDetector(opts Options) (Detector, error) {
 		return nil, fmt.Errorf("ai: model input shape must be static NCHW, got %v", inputDims)
 	}
 	inputH, inputW := inputDims[2], inputDims[3]
-	if len(outputDims) != 3 || outputDims[1] != int64(numPoints) || outputDims[2] != int64(numChannels) {
-		return nil, fmt.Errorf("ai: model output shape must be [1,%d,%d], got %v (not a nanodet-plus-m_320 model?)",
-			numPoints, numChannels, outputDims)
+	if inputH != inputW {
+		return nil, fmt.Errorf("ai: NanoDet expects a square input, got %dx%d", inputW, inputH)
+	}
+	// The expected point count follows the input size (gridLayout), so any
+	// same-family export (320, 416, …) validates and decodes uniformly.
+	expectedPoints := gridForInput(uint32(inputW)).points
+	if len(outputDims) != 3 || outputDims[1] != int64(expectedPoints) || outputDims[2] != int64(numChannels) {
+		return nil, fmt.Errorf("ai: model output shape must be [1,%d,%d], got %v (not a nanodet family model for input %d?)",
+			expectedPoints, numChannels, outputDims, inputW)
 	}
 	outputShape := ort.Shape{outputDims[0], outputDims[1], outputDims[2]}
 
@@ -94,13 +119,18 @@ func (d *OrtDetector) Detect(frame *Frame, videoW, videoH uint32) ([]Detection, 
 	defer outputTensor.Destroy()
 
 	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		return nil, fmt.Errorf("ai: session for %s was closed", d.modelPath)
+	}
 	err = d.session.Run([]ort.Value{inputTensor}, []ort.Value{outputTensor})
 	d.mu.Unlock()
 	if err != nil {
 		return nil, fmt.Errorf("ai: inference: %w", err)
 	}
 
-	detections, err := postprocess(outputTensor.GetData(), preNMSConfidence)
+	grid := gridForInput(d.inputW)
+	detections, err := postprocess(outputTensor.GetData(), grid, preNMSConfidence)
 	if err != nil {
 		return nil, err
 	}
@@ -109,3 +139,16 @@ func (d *OrtDetector) Detect(frame *Frame, videoW, videoH uint32) ([]Detection, 
 
 // ModelName identifies the active model.
 func (d *OrtDetector) ModelName() string { return d.modelPath }
+
+// Close destroys the ONNX session. Hot-swaps call it on the replaced
+// detector so its native (C++) memory is released immediately instead of
+// waiting for a finalizer — the Pi 3B has no RAM to lend.
+func (d *OrtDetector) Close() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closed {
+		return
+	}
+	d.closed = true
+	_ = d.session.Destroy()
+}

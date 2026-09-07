@@ -320,6 +320,7 @@ func main() {
 	// NewService returns nil when disabled or unavailable.
 	aiService := ai.NewService(ai.Options{
 		Enabled:             cfg.AI.Enabled,
+		Model:               cfg.AI.Model,
 		ModelPath:           cfg.AI.ModelPath,
 		OnnxLibPath:         cfg.AI.OnnxLibPath,
 		ConfidenceThreshold: cfg.AI.ConfidenceThreshold,

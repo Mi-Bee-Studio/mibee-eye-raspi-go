@@ -48,7 +48,11 @@ type Frame struct {
 type Options struct {
 	// Enabled is the master switch ([ai] enabled).
 	Enabled bool
-	// ModelPath points at the NanoDet ONNX model.
+	// Model is the registry id of the startup model (SPEC §4.6); an empty
+	// value means "nanodet-plus-m-320".
+	Model string
+	// ModelPath points at the NanoDet ONNX model. A non-default value
+	// overrides the registry id (custom deployments).
 	ModelPath string
 	// OnnxLibPath points at libonnxruntime.so (empty = library search
 	// path / system default).
@@ -65,6 +69,9 @@ type Options struct {
 
 func (o *Options) withDefaults() Options {
 	c := *o
+	if c.Model == "" {
+		c.Model = "nanodet-plus-m-320"
+	}
 	if c.ModelPath == "" {
 		c.ModelPath = "/var/lib/mibee-eye/models/nanodet-m.onnx"
 	}
@@ -87,6 +94,13 @@ type Detector interface {
 	Detect(frame *Frame, videoW, videoH uint32) ([]Detection, error)
 	// ModelName identifies the active model.
 	ModelName() string
+}
+
+// Closer is the optional release hook detectors may implement: hot model
+// swaps call Close on the replaced detector so native (ONNX Runtime C++)
+// memory is freed immediately rather than at finalization.
+type Closer interface {
+	Close()
 }
 
 // stubDetector is returned when the binary lacks the `ai` build tag.

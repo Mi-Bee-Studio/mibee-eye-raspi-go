@@ -104,6 +104,7 @@ func New(cfg Config) *Server {
 	return &Server{
 		cfg:            cfg,
 		observe:        NewObserve(),
+		hub:            newSSEHub(logger),
 		logger:         logger,
 		username:       username,
 		password:       password,
@@ -127,7 +128,10 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 
 	s.mux = http.NewServeMux()
-	s.hub = newSSEHub(s.logger)
+	if s.hub == nil {
+		// New() normally wires the hub; keep Start() self-sufficient too.
+		s.hub = newSSEHub(s.logger)
+	}
 
 	// Imaging parameter changes → SSE param_changed events (SPEC §6).
 	if s.cfg.Params != nil {
@@ -248,6 +252,8 @@ func (s *Server) registerRoutes() {
 
 	// AI detections (SPEC v1 §4.6).
 	m.HandleFunc("GET /api/detections", s.authRequired(s.handleDetections))
+	m.HandleFunc("GET /api/ai/models", s.authRequired(s.handleAIModels))
+	m.HandleFunc("POST /api/ai/models/{id}/activate", s.authRequired(s.handleAIModelActivate))
 
 	// SSE events (SPEC §6).
 	m.HandleFunc("GET /api/events", s.authRequired(s.handleEvents))

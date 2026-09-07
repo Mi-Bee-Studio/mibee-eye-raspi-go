@@ -19,15 +19,17 @@ import (
 
 // Service runs the detection loop for one camera.
 type Service struct {
-	detector  Detector
-	decoder   *FrameDecoder
-	opts      Options
-	mu        sync.RWMutex
-	snap      Snapshot
-	events    chan Event
-	inference atomic.Uint64
-	frame     atomic.Uint64
-	active    bool
+	detector    Detector
+	newDetector func(Options) (Detector, error)
+	decoder     *FrameDecoder
+	opts        Options
+	mu          sync.RWMutex
+	snap        Snapshot
+	events      chan Event
+	inference   atomic.Uint64
+	frame       atomic.Uint64
+	active      bool
+	modelID     string
 }
 
 // NewService builds the AI service from options. It returns (nil, nil)
@@ -39,23 +41,83 @@ func NewService(opts Options, hub *h264.AUHub, newDetector func(Options) (Detect
 		slog.Info("ai: disabled by configuration")
 		return nil
 	}
+	model, ok := Resolve(opts.Model, opts.ModelPath)
+	if !ok {
+		slog.Warn("ai: invalid model configuration, AI stays disabled (fail-open)",
+			"model", opts.Model)
+		return nil
+	}
 	detector, err := newDetector(opts)
 	if err != nil {
 		slog.Warn("ai: detector unavailable, AI stays disabled (fail-open)", "error", err)
 		return nil
 	}
 	return &Service{
-		detector: detector,
-		decoder:  NewFrameDecoder(hub, opts.DecoderBin),
-		opts:     opts,
-		events:   make(chan Event, 16),
-		active:   true,
-		snap:     Snapshot{Detections: []Detection{}, Model: detector.ModelName()},
+		detector:    detector,
+		newDetector: newDetector,
+		decoder:     NewFrameDecoder(hub, opts.DecoderBin),
+		opts:        opts,
+		events:      make(chan Event, 16),
+		active:      true,
+		modelID:     model.ID,
+		snap:        Snapshot{Detections: []Detection{}, Model: model.ID},
 	}
 }
 
 // Active reports whether a real detector is loaded.
 func (s *Service) Active() bool { return s != nil && s.active }
+
+// ModelID identifies the active model id (SPEC §4.6; "" when inactive).
+func (s *Service) ModelID() string {
+	if !s.Active() {
+		return ""
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.modelID
+}
+
+// currentDetector returns the detector for this iteration (SPEC §4.6
+// hot-swap): the slot is swapped under the write lock, so the loop always
+// runs the model that is active now.
+func (s *Service) currentDetector() Detector {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.detector
+}
+
+// ActivateModel hot-switches the running model (SPEC §4.6 activate). The
+// new detector is fully built BEFORE the slot is touched, so a failed load
+// leaves the old model running (rollback by construction). Stale snapshots
+// from the previous model are cleared.
+func (s *Service) ActivateModel(id string) error {
+	spec, ok := Find(id)
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrUnknownModel, id)
+	}
+	if !Available(spec.Path) {
+		return fmt.Errorf("%w: %s", ErrModelUnavailable, spec.Path)
+	}
+	opts := s.opts
+	opts.Model = id
+	opts.ModelPath = spec.Path
+	detector, err := s.newDetector(opts)
+	if err != nil {
+		return fmt.Errorf("loading model %s: %w", id, err)
+	}
+	s.mu.Lock()
+	old := s.detector
+	s.detector = detector
+	s.modelID = id
+	s.snap = Snapshot{Detections: []Detection{}, Model: id, Timestamp: time.Now().Unix()}
+	s.mu.Unlock()
+	// Release the replaced session's native memory promptly (Pi 3B hygiene).
+	if c, ok := old.(Closer); ok {
+		c.Close()
+	}
+	slog.Info("ai: model activated", "model", id, "input", spec.Input)
+	return nil
+}
 
 // ModelName identifies the active model ("" when inactive).
 func (s *Service) ModelName() string {
@@ -116,7 +178,7 @@ func (s *Service) runLoop(ctx context.Context, frames <-chan Frame) {
 		lastRun = time.Now()
 		frameNo := s.frame.Add(1)
 
-		detections, err := s.detector.Detect(&frame, s.opts.VideoW, s.opts.VideoH)
+		detections, err := s.currentDetector().Detect(&frame, s.opts.VideoW, s.opts.VideoH)
 		if err != nil {
 			slog.Warn("ai: inference error", "error", err)
 			s.storeSnapshot(nil)
@@ -146,7 +208,7 @@ func (s *Service) storeSnapshot(detections []Detection) {
 	s.mu.Lock()
 	s.snap = Snapshot{
 		Detections: detections,
-		Model:      s.detector.ModelName(),
+		Model:      s.modelID,
 		Timestamp:  time.Now().Unix(),
 	}
 	s.mu.Unlock()
