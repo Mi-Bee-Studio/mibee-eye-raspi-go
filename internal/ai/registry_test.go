@@ -1,6 +1,10 @@
 package ai
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestResolveDefaultIsRegistry320(t *testing.T) {
 	m, ok := Resolve("", DefaultModelPath)
@@ -43,10 +47,65 @@ func TestResolveUnknownIDRejected(t *testing.T) {
 
 func TestRegistryIDsUnique(t *testing.T) {
 	seen := map[string]bool{}
-	for _, m := range Registry {
+	for _, m := range RegistryList() {
 		if seen[m.ID] {
 			t.Fatalf("duplicate id %s", m.ID)
 		}
 		seen[m.ID] = true
+	}
+}
+
+func TestUploadedManifestRoundtrip(t *testing.T) {
+	dir := t.TempDir()
+	InitRegistry(dir)
+	t.Cleanup(func() { InitRegistry("") })
+	if len(RegistryList()) != len(builtinModels()) {
+		t.Fatalf("fresh registry = %d entries", len(RegistryList()))
+	}
+
+	f := filepath.Join(dir, "custom-model.onnx")
+	if err := os.WriteFile(f, []byte("onnx"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := RegisterUploaded(ModelSpec{
+		ID: "custom-model", Family: "yolox", Input: 416,
+		Path: f, Source: "uploaded",
+	}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if _, ok := Find("custom-model"); !ok {
+		t.Fatal("entry must be findable")
+	}
+
+	// Reload picks the manifest up.
+	InitRegistry(dir)
+	m, ok := Find("custom-model")
+	if !ok || m.Source != "uploaded" || m.Input != 416 {
+		t.Fatalf("reloaded entry = %+v ok=%v", m, ok)
+	}
+
+	// Vanished file prunes on reload.
+	os.Remove(f)
+	InitRegistry(dir)
+	if _, ok := Find("custom-model"); ok {
+		t.Fatal("vanished entry must be pruned")
+	}
+
+	// Remove refuses builtin.
+	if RemoveUploaded("nanodet-plus-m-320") != nil {
+		t.Fatal("builtin removal must be refused")
+	}
+}
+
+func TestValidModelID(t *testing.T) {
+	for _, ok := range []string{"nanodet-plus-m-320", "my-model-1", "a"} {
+		if !ValidModelID(ok) {
+			t.Errorf("%q must be valid", ok)
+		}
+	}
+	for _, bad := range []string{"", "-leading", "Upper", "has_underscore", "has space", string(make([]byte, 65))} {
+		if ValidModelID(bad) {
+			t.Errorf("%q must be invalid", bad)
+		}
 	}
 }

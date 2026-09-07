@@ -82,6 +82,21 @@ func (s *Service) ModelID() string {
 	return s.modelID
 }
 
+// ValidateModel fully loads a session for the declared family — the
+// upload gate (SPEC §4.6): only models that load enter the registry. Uses
+// the injected factory, so tests validate with fakes. Returns the model's
+// input size for the registry entry.
+func (s *Service) ValidateModel(path, family string) (int, error) {
+	if !s.Active() {
+		return 0, fmt.Errorf("ai: service not active")
+	}
+	det, err := s.newDetector(Options{ModelPath: path, Family: family})
+	if err != nil {
+		return 0, err
+	}
+	return det.InputSize(), nil
+}
+
 // currentDetector returns the detector for this iteration (SPEC §4.6
 // hot-swap): the slot is swapped under the write lock, so the loop always
 // runs the model that is active now.

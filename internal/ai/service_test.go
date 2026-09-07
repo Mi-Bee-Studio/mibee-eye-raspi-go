@@ -30,6 +30,8 @@ func (f *fakeDetector) Detect(frame *Frame, videoW, videoH uint32) ([]Detection,
 
 func (f *fakeDetector) ModelName() string { return f.model }
 
+func (f *fakeDetector) InputSize() int { return 416 }
+
 func newSvc(t *testing.T, opts Options) *Service {
 	t.Helper()
 	svc := NewService(opts, nil, func(Options) (Detector, error) {
@@ -191,9 +193,24 @@ func withTempModel416(t *testing.T) {
 	if err := os.WriteFile(f, []byte("onnx"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	old := Registry[1].Path
-	Registry[1].Path = f
-	t.Cleanup(func() { Registry[1].Path = old })
+	entries := RegistryList()
+	var old string
+	for i, m := range entries {
+		if m.ID == "nanodet-plus-m-416" {
+			old = m.Path
+			entries[i].Path = f
+		}
+	}
+	SetRegistryEntries(entries)
+	t.Cleanup(func() {
+		entries := RegistryList()
+		for i, m := range entries {
+			if m.ID == "nanodet-plus-m-416" {
+				entries[i].Path = old
+			}
+		}
+		SetRegistryEntries(entries)
+	})
 }
 
 func TestActivateModelSwapsModelIDAndSnapshot(t *testing.T) {

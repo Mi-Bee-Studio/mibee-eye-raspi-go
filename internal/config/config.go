@@ -137,6 +137,7 @@ type RecordingConfig struct {
 // otherwise the feature reports unavailable (fail-open).
 type AIConfig struct {
 	Enabled             bool    `yaml:"enabled"`              // master switch (default off)
+	AllowUpload         bool    `yaml:"allow_upload"`         // runtime model uploads (SPEC §4.6 ai_upload; default off)
 	Model               string  `yaml:"model"`                // registry id of the startup model (SPEC §4.6)
 	ModelPath           string  `yaml:"model_path"`           // NanoDet ONNX model (non-default overrides the registry id)
 	OnnxLibPath         string  `yaml:"onnx_lib_path"`        // libonnxruntime.so location

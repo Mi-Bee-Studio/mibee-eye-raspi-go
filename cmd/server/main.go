@@ -318,6 +318,7 @@ func main() {
 	// Taps the AUHub (passive — never the capture/encode path): an ffmpeg
 	// subprocess decodes keyframes, ONNX Runtime runs NanoDet inference.
 	// NewService returns nil when disabled or unavailable.
+	ai.InitRegistry("/var/lib/mibee-eye/models")
 	aiService := ai.NewService(ai.Options{
 		Enabled:             cfg.AI.Enabled,
 		Model:               cfg.AI.Model,

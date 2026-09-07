@@ -167,6 +167,9 @@ func (d *OrtDetector) Detect(frame *Frame, videoW, videoH uint32) ([]Detection, 
 // ModelName identifies the active model.
 func (d *OrtDetector) ModelName() string { return d.modelPath }
 
+// InputSize returns the square model input size in pixels.
+func (d *OrtDetector) InputSize() int { return int(d.inputW) }
+
 // Close destroys the ONNX session. Hot-swaps call it on the replaced
 // detector so its native (C++) memory is released immediately instead of
 // waiting for a finalizer — the Pi 3B has no RAM to lend.

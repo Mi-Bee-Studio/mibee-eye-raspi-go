@@ -6,8 +6,10 @@ package web
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/ai"
@@ -95,6 +97,7 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	// Hot-swap is available exactly when a real detector is loaded: in
 	// tag-less builds the factory fails, so AI is never active there.
 	aiModels := s.cfg.AI != nil && s.cfg.AI.Active()
+	aiUpload := aiModels && s.aiAllowUpload()
 	if s.cfg.AI != nil && s.cfg.AI.Active() {
 		events = append(events, "ai_detection")
 	}
@@ -110,6 +113,7 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 		"imaging":           s.cfg.Params != nil,
 		"ai":                s.cfg.AI != nil && s.cfg.AI.Active(),
 		"ai_models":         aiModels,
+		"ai_upload":         aiUpload,
 		"ptz":               false,
 		"hls":               true,
 		"recording":         false,
@@ -164,13 +168,13 @@ func (s *Server) handleAIModels(w http.ResponseWriter, r *http.Request) {
 		Source    string `json:"source"`
 		Available bool   `json:"available"`
 	}
-	models := make([]modelEntry, 0, len(ai.Registry))
-	for _, spec := range ai.Registry {
+	models := make([]modelEntry, 0)
+	for _, spec := range ai.RegistryList() {
 		models = append(models, modelEntry{
 			ID:        spec.ID,
 			Family:    spec.Family,
 			Input:     spec.Input,
-			Source:    "builtin",
+			Source:    spec.Source,
 			Available: ai.Available(spec.Path),
 		})
 	}
@@ -191,10 +195,35 @@ func (s *Server) handleAIModels(w http.ResponseWriter, r *http.Request) {
 	} else if m, ok := s.resolveConfiguredModel(); ok {
 		active = m.ID
 	}
-	writeOK(w, http.StatusOK, map[string]interface{}{
+	resp := map[string]interface{}{
 		"active": active,
 		"models": models,
-	})
+	}
+	if s.aiAllowUpload() {
+		resp["upload"] = map[string]interface{}{
+			"allowed":   true,
+			"max_bytes": ai.UploadMaxBytes,
+		}
+	}
+	writeOK(w, http.StatusOK, resp)
+}
+
+// aiAllowUpload reads the [ai] allow_upload flag from the YAML config.
+func (s *Server) aiAllowUpload() bool {
+	if s.cfg.ConfigPath == "" {
+		return false
+	}
+	data, err := os.ReadFile(s.cfg.ConfigPath)
+	if err != nil {
+		return false
+	}
+	var cfg map[string]interface{}
+	if yaml.Unmarshal(data, &cfg) != nil {
+		return false
+	}
+	sec, _ := cfg["ai"].(map[string]interface{})
+	v, _ := sec["allow_upload"].(bool)
+	return v
 }
 
 // resolveConfiguredModel reads the ai section of the YAML config and maps
@@ -251,6 +280,130 @@ func (s *Server) handleAIModelActivate(w http.ResponseWriter, r *http.Request) {
 		"active":  id,
 		"applied": "immediate",
 	})
+}
+
+// handleAIModelUpload (POST /api/ai/models/{id}): SPEC v1 §4.6 upload
+// (capability ai_upload). Multipart fields: family + file. The file is
+// fully loaded and shape-validated BEFORE entering the registry; failures
+// leave no trace on disk.
+func (s *Server) handleAIModelUpload(w http.ResponseWriter, r *http.Request) {
+	if !s.aiAllowUpload() {
+		writeError(w, http.StatusNotImplemented, "model upload disabled ([ai] allow_upload)")
+		return
+	}
+	id := r.PathValue("id")
+	if !ai.ValidModelID(id) {
+		writeError(w, http.StatusBadRequest, "invalid model id (want ^[a-z0-9][a-z0-9-]{0,63}$)")
+		return
+	}
+	if _, ok := ai.Find(id); ok {
+		writeError(w, http.StatusConflict, "model id already exists")
+		return
+	}
+	dir := ai.RegistryDir()
+	if dir == "" {
+		writeError(w, http.StatusNotImplemented, "no models directory configured")
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, ai.UploadMaxBytes+(1<<20))
+	if err := r.ParseMultipartForm(1 << 20); err != nil {
+		writeError(w, http.StatusRequestEntityTooLarge, "multipart parse failed (size cap?)")
+		return
+	}
+	defer r.MultipartForm.RemoveAll()
+
+	familyStr := r.FormValue("family")
+	if familyStr != "nanodet" && familyStr != "yolox" {
+		writeError(w, http.StatusBadRequest, "family must be nanodet or yolox")
+		return
+	}
+	files := r.MultipartForm.File["file"]
+	if len(files) != 1 {
+		writeError(w, http.StatusBadRequest, "exactly one file field is required")
+		return
+	}
+	in, err := files[0].Open()
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	defer in.Close()
+
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	tmp, err := os.CreateTemp(dir, ".upload-*.tmp")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	tmpName := tmp.Name()
+	written, err := io.Copy(tmp, in)
+	tmp.Close()
+	if err != nil {
+		os.Remove(tmpName)
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if written > ai.UploadMaxBytes {
+		os.Remove(tmpName)
+		writeError(w, http.StatusRequestEntityTooLarge, "model exceeds max_bytes")
+		return
+	}
+
+	// Validation = fully loading a session through the service's injected
+	// factory (tests stub it; production builds a real ORT session).
+	input, err := s.cfg.AI.ValidateModel(tmpName, familyStr)
+	if err != nil {
+		os.Remove(tmpName)
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("model failed validation: %v", err))
+		return
+	}
+	finalPath := filepath.Join(dir, id+".onnx")
+	if err := os.Rename(tmpName, finalPath); err != nil {
+		os.Remove(tmpName)
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	spec := ai.ModelSpec{ID: id, Family: familyStr, Input: input, Path: finalPath, Source: "uploaded"}
+	if err := ai.RegisterUploaded(spec); err != nil {
+		os.Remove(finalPath)
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.logger.Printf("web: ai model uploaded: %s (family %s)", id, familyStr)
+	writeOK(w, http.StatusCreated, map[string]interface{}{
+		"id": spec.ID, "family": spec.Family, "input": spec.Input,
+		"source": spec.Source, "available": true,
+	})
+}
+
+// handleAIModelDelete (DELETE /api/ai/models/{id}): SPEC v1 §4.6. Only
+// uploaded entries; the running model and builtin entries are refused.
+func (s *Server) handleAIModelDelete(w http.ResponseWriter, r *http.Request) {
+	if !s.aiAllowUpload() {
+		writeError(w, http.StatusNotImplemented, "model upload disabled ([ai] allow_upload)")
+		return
+	}
+	id := r.PathValue("id")
+	if s.cfg.AI != nil && s.cfg.AI.ModelID() == id {
+		writeError(w, http.StatusConflict, "cannot delete the active model; activate another first")
+		return
+	}
+	spec := ai.RemoveUploaded(id)
+	if spec == nil {
+		if _, ok := ai.Find(id); ok {
+			writeError(w, http.StatusConflict, "builtin models cannot be deleted")
+		} else {
+			writeError(w, http.StatusNotFound, "unknown model id")
+		}
+		return
+	}
+	os.Remove(spec.Path)
+	s.logger.Printf("web: ai model removed: %s", id)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // persistAIModel merges the activated model id into the YAML ai section

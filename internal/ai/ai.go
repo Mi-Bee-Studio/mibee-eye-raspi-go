@@ -100,6 +100,9 @@ type Detector interface {
 	Detect(frame *Frame, videoW, videoH uint32) ([]Detection, error)
 	// ModelName identifies the active model.
 	ModelName() string
+	// InputSize returns the square model input size in pixels (0 =
+	// unknown); registry metadata for uploads (SPEC §4.6).
+	InputSize() int
 }
 
 // Closer is the optional release hook detectors may implement: hot model
@@ -117,6 +120,8 @@ func (stubDetector) Detect(*Frame, uint32, uint32) ([]Detection, error) {
 }
 
 func (stubDetector) ModelName() string { return "" }
+
+func (stubDetector) InputSize() int { return 0 }
 
 // errNotBuilt is reported by builds without the `ai` tag.
 var errNotBuilt = &notBuiltError{}

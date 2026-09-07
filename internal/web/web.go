@@ -254,6 +254,8 @@ func (s *Server) registerRoutes() {
 	m.HandleFunc("GET /api/detections", s.authRequired(s.handleDetections))
 	m.HandleFunc("GET /api/ai/models", s.authRequired(s.handleAIModels))
 	m.HandleFunc("POST /api/ai/models/{id}/activate", s.authRequired(s.handleAIModelActivate))
+	m.HandleFunc("POST /api/ai/models/{id}", s.authRequired(s.handleAIModelUpload))
+	m.HandleFunc("DELETE /api/ai/models/{id}", s.authRequired(s.handleAIModelDelete))
 
 	// SSE events (SPEC §6).
 	m.HandleFunc("GET /api/events", s.authRequired(s.handleEvents))
