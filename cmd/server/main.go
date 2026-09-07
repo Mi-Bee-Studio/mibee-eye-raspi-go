@@ -16,6 +16,7 @@ import (
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/ai"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/camera"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/config"
+	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/gb35114auth"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/h264"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/hls"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/metrics"
@@ -487,7 +488,16 @@ func main() {
 		// stamp this product's identity explicitly before New (concurrent
 		// mutation afterwards would race the message builders).
 		gbdev.UserAgent = fmt.Sprintf("mibee-eye-raspi-go/%s", version)
-		gbServer = gbdev.New(toDeviceConfig(cfg.GB28181), toDeviceInfo(cfg.Device), auHubFrameSource{hub: auHub})
+		devCfg := toDeviceConfig(cfg.GB28181)
+		// GB 35114 A-level: replaces Digest auth when configured (and the
+		// binary carries -tags gb35114). Errors are fatal — running with a
+		// half-configured security identity would silently downgrade.
+		authenticator, err := gb35114auth.Build(cfg.GB28181.GB35114, cfg.GB28181.DeviceID)
+		if err != nil {
+			log.Fatalf("gb28181: %v", err)
+		}
+		devCfg.RegisterAuthenticator = authenticator
+		gbServer = gbdev.New(devCfg, toDeviceInfo(cfg.Device), auHubFrameSource{hub: auHub})
 		// Wire the recording index for RecordInfo queries (nil when recording disabled).
 		if recWriter != nil {
 			gbServer.SetRecordingIndex(recordingIndexAdapter{idx: recWriter.Index(), root: cfg.Recording.StoragePath})
@@ -521,25 +531,25 @@ func main() {
 		defer metricsServer.Close()
 
 		// Poll loop: snapshot camera drops, AUHub drops, RTSP clients, camera alive
-			go func() {
-				ticker := time.NewTicker(5 * time.Second)
-				defer ticker.Stop()
-				for {
-					select {
-					case <-ticker.C:
-						metricsCollector.SetFramesDropped(auHub.DroppedAUs())
-						if rtspServer != nil {
-							metricsCollector.SetRTSPClients(rtspServer.ClientCount())
-						}
-						// Camera auto-restarts on failure, so it's effectively always alive
-						// once Start() succeeds. Set to 1 unconditionally.
-						metricsCollector.SetCameraAlive(true)
-						if aiService != nil {
-							metricsCollector.SetAIInferences(aiService.Inferences())
-						}
+		go func() {
+			ticker := time.NewTicker(5 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					metricsCollector.SetFramesDropped(auHub.DroppedAUs())
+					if rtspServer != nil {
+						metricsCollector.SetRTSPClients(rtspServer.ClientCount())
+					}
+					// Camera auto-restarts on failure, so it's effectively always alive
+					// once Start() succeeds. Set to 1 unconditionally.
+					metricsCollector.SetCameraAlive(true)
+					if aiService != nil {
+						metricsCollector.SetAIInferences(aiService.Inferences())
 					}
 				}
-			}()
+			}
+		}()
 		slog.Info("metrics: enabled", "port", cfg.Metrics.Port)
 	} else {
 		slog.Info("metrics: disabled")

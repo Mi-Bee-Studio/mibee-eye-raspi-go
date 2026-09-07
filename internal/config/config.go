@@ -30,8 +30,8 @@ type CameraConfig struct {
 	BinPath         string        `yaml:"bin_path"`          // Path to mtxrpicam binary
 	FrameBufferSize int           `yaml:"frame_buffer_size"` // Frame channel buffer capacity
 	MaxBackoff      time.Duration `yaml:"max_backoff"`       // Max subprocess restart backoff
-	HFlip           bool          `yaml:"hflip"`              // Device-level horizontal mirror (baked into the encoded stream)
-	VFlip           bool          `yaml:"vflip"`              // Device-level vertical flip (upside-down mount compensation)
+	HFlip           bool          `yaml:"hflip"`             // Device-level horizontal mirror (baked into the encoded stream)
+	VFlip           bool          `yaml:"vflip"`             // Device-level vertical flip (upside-down mount compensation)
 }
 
 // RTSPConfig holds RTSP server settings.
@@ -121,6 +121,23 @@ type GB28181Config struct {
 	HeartbeatIntervalSecs int    `yaml:"heartbeat_interval_secs"` // SIP keepalive heartbeat interval (seconds)
 	HeartbeatTimeoutCount int    `yaml:"heartbeat_timeout_count"` // Missed heartbeats before declaring timeout
 	Transport             string `yaml:"transport"`               // SIP transport: udp (default) or tcp
+
+	// GB35114 opts into GB 35114 A-level security for the REGISTER
+	// lifecycle. Requires a binary built with `-tags gb35114` and
+	// pre-provisioned SM2 certificates (GM/T 0015-2012). Default off.
+	GB35114 GB35114Config `yaml:"gb35114"`
+}
+
+// GB35114Config holds GB 35114 A-level security settings. When enabled,
+// REGISTER authentication switches from SIP Digest to SM2-certificate
+// mutual authentication; a build without `-tags gb35114` logs a warning
+// and falls back to Digest.
+type GB35114Config struct {
+	Enabled          bool   `yaml:"enabled"`            // Enable A-level authentication (requires -tags gb35114)
+	DeviceCertFile   string `yaml:"device_cert_file"`   // Device SM2 signing certificate (PEM)
+	DeviceKeyFile    string `yaml:"device_key_file"`    // Device SM2 private key (SEC1 or PKCS#8 PEM)
+	PlatformCertFile string `yaml:"platform_cert_file"` // Platform signing certificate — verifies sign2 (Bidirection)
+	ServerID         string `yaml:"server_id"`          // 20-digit SIP server ID being authenticated to
 }
 
 // RecordingConfig holds local recording settings.
@@ -250,6 +267,7 @@ func DefaultConfig() *Config {
 			HeartbeatIntervalSecs: 60,
 			HeartbeatTimeoutCount: 3,
 			Transport:             "udp",
+			GB35114:               GB35114Config{},
 		},
 		Recording: RecordingConfig{
 			Enabled:       false,
@@ -366,6 +384,11 @@ func applyEnvOverrides(cfg *Config) {
 	overrideBool("MIBEE_EYE_GB28181_ENABLED", &cfg.GB28181.Enabled)
 	overrideString("MIBEE_EYE_GB28181_PLATFORM_SIP_ADDRESS", &cfg.GB28181.PlatformSIPAddress)
 	overrideInt("MIBEE_EYE_GB28181_PLATFORM_SIP_PORT", &cfg.GB28181.PlatformSIPPort)
+	overrideBool("MIBEE_EYE_GB28181_GB35114_ENABLED", &cfg.GB28181.GB35114.Enabled)
+	overrideString("MIBEE_EYE_GB28181_GB35114_DEVICE_CERT_FILE", &cfg.GB28181.GB35114.DeviceCertFile)
+	overrideString("MIBEE_EYE_GB28181_GB35114_DEVICE_KEY_FILE", &cfg.GB28181.GB35114.DeviceKeyFile)
+	overrideString("MIBEE_EYE_GB28181_GB35114_PLATFORM_CERT_FILE", &cfg.GB28181.GB35114.PlatformCertFile)
+	overrideString("MIBEE_EYE_GB28181_GB35114_SERVER_ID", &cfg.GB28181.GB35114.ServerID)
 	overrideString("MIBEE_EYE_GB28181_DEVICE_ID", &cfg.GB28181.DeviceID)
 	overrideString("MIBEE_EYE_GB28181_CHANNEL_ID", &cfg.GB28181.ChannelID)
 	overrideString("MIBEE_EYE_GB28181_SIP_DOMAIN", &cfg.GB28181.SIPDomain)
@@ -484,8 +507,10 @@ func (c *Config) Validate() error {
 	default:
 		return fmt.Errorf("config.gb28181.transport: %w", errInvalidTransport)
 	}
-	if c.GB28181.Enabled && c.GB28181.Password == "" {
-		return fmt.Errorf("config.gb28181.password: must not be empty when gb28181.enabled (set gb28181.password or MIBEE_EYE_GB28181_PASSWORD)")
+	// GB35114 A-level replaces Digest auth, so the Digest password is not
+	// required when it is enabled.
+	if c.GB28181.Enabled && c.GB28181.Password == "" && !c.GB28181.GB35114.Enabled {
+		return fmt.Errorf("config.gb28181.password: must not be empty when gb28181.enabled (set gb28181.password or MIBEE_EYE_GB28181_PASSWORD, or enable gb35114)")
 	}
 	if c.Recording.SegmentSecs < 60 {
 		c.Recording.SegmentSecs = 60

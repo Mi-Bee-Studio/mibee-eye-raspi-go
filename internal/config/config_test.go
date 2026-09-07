@@ -676,3 +676,58 @@ func TestAISectionValidation(t *testing.T) {
 		t.Error("out-of-range confidence_threshold must be rejected")
 	}
 }
+
+func TestGB35114ConfigParsing(t *testing.T) {
+	cfgYAML := `
+gb28181:
+  enabled: true
+  gb35114:
+    enabled: true
+    device_cert_file: "/etc/mibee-eye/gb35114/device_cert.pem"
+    device_key_file: "/etc/mibee-eye/gb35114/device_key.pem"
+    platform_cert_file: "/etc/mibee-eye/gb35114/platform_cert.pem"
+    server_id: "34020000002000000001"
+`
+	path := writeTempYAML(t, cfgYAML)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	g := cfg.GB28181.GB35114
+	if !g.Enabled {
+		t.Fatal("gb35114.enabled = false, want true")
+	}
+	if g.DeviceCertFile != "/etc/mibee-eye/gb35114/device_cert.pem" ||
+		g.DeviceKeyFile != "/etc/mibee-eye/gb35114/device_key.pem" ||
+		g.PlatformCertFile != "/etc/mibee-eye/gb35114/platform_cert.pem" {
+		t.Fatalf("gb35114 cert paths not parsed: %+v", g)
+	}
+	if g.ServerID != "34020000002000000001" {
+		t.Fatalf("gb35114.server_id = %q", g.ServerID)
+	}
+}
+
+func TestGB35114ConfigDisabledByDefault(t *testing.T) {
+	cfg, err := Load(writeTempYAML(t, "gb28181:\n  enabled: true\n  password: \"12345678\"\n"))
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.GB28181.GB35114.Enabled {
+		t.Fatal("gb35114 must default to disabled")
+	}
+}
+
+func TestGB35114RelaxesPasswordRequirement(t *testing.T) {
+	// GB35114 replaces Digest auth — an empty Digest password is valid
+	// when A-level security is enabled.
+	cfgYAML := `
+gb28181:
+  enabled: true
+  gb35114:
+    enabled: true
+    server_id: "34020000002000000001"
+`
+	if _, err := Load(writeTempYAML(t, cfgYAML)); err != nil {
+		t.Fatalf("Load with gb35114 and no password failed: %v", err)
+	}
+}
