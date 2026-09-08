@@ -8,7 +8,7 @@ This document provides detailed compliance information for the MiBee Eye ONVIF c
 | Component | Status | Notes |
 |-----------|--------|-------|
 | **ONVIF Device Service** | ✅ Full | WS-Discovery, GetDeviceInformation, GetCapabilities |
-| **ONVIF Media Service** | ✅ Full | GetProfiles, GetStreamUri, VideoSource support |
+| **ONVIF Media Service** | ✅ Full | GetProfiles, GetStreamUri, GetSnapshotUri, VideoSource support |
 | **ONVIF PTZ Service** | ❌ Not implemented | PTZ removed as dead code (no camera wiring) |
 | **ONVIF Imaging Service** | ✅ Full | Brightness, contrast, saturation, sharpness, exposure, white balance |
 | **WS-Discovery** | ✅ Full | UDP multicast + HTTP POST probe support |
@@ -49,6 +49,7 @@ Imaging: XAddr: "http://<camera-ip>:8080/onvif/device_service"
 |-----------|-------------|-------|
 | `GetProfiles` | ✅ | Single profile with H.264 encoding |
 | `GetStreamUri` | ✅ | Returns RTSP URL (rtsp://host:port/stream) |
+| `GetSnapshotUri` | ✅ | Returns the legacy JPEG endpoint (http://host:8088/snapshot) |
 | `GetVideoSources` | ✅ | Single video source (Pi Camera) |
 
 **Profile Configuration:**
@@ -179,7 +180,7 @@ UsernameToken authentication is implemented with both password types:
 - **Protocol**: ONVIF Client (0x524a/onvif-go library)
 - **Discovery**: WS-Discovery + HTTP probe
 - **Authentication**: UsernameToken Digest
-- **Operations**: GetDeviceInformation, GetCapabilities, GetProfiles, GetStreamUri
+- **Operations**: GetDeviceInformation, GetCapabilities, GetProfiles, GetStreamUri, GetSnapshotUri
 - **Integration Status**: ✅ Fully compatible
 
 ### Compatibility Notes

@@ -8,7 +8,7 @@
 | 组件 | 状态 | 备注 |
 |-----------|--------|-------|
 | **ONVIF Device 服务** | ✅ 完整 | WS-Discovery、GetDeviceInformation、GetCapabilities |
-| **ONVIF Media 服务** | ✅ 完整 | GetProfiles、GetStreamUri、VideoSource 支持 |
+| **ONVIF Media 服务** | ✅ 完整 | GetProfiles、GetStreamUri、GetSnapshotUri、VideoSource 支持 |
 | **ONVIF PTZ 服务** | ❌ 未实现 | PTZ 已作为死代码移除（未连接到相机） |
 | **ONVIF Imaging 服务** | ✅ 完整 | 亮度、对比度、饱和度、锐度、曝光、白平衡 |
 | **WS-Discovery** | ✅ 完整 | UDP 组播 + HTTP POST 探测支持 |
@@ -49,6 +49,7 @@ Imaging: XAddr: "http://<相机IP>:8080/onvif/device_service"
 |-----------|-------------|-------|
 | `GetProfiles` | ✅ | 单个配置文件，包含 H.264 编码 |
 | `GetStreamUri` | ✅ | 返回 RTSP URL（rtsp://host:port/stream） |
+| `GetSnapshotUri` | ✅ | 返回遗留 JPEG 快照端点（http://host:8088/snapshot） |
 | `GetVideoSources` | ✅ | 单个视频源（Pi Camera） |
 
 **配置文件配置：**
