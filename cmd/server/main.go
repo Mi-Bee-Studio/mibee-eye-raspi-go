@@ -506,6 +506,10 @@ func main() {
 		if recWriter != nil {
 			gbServer.SetRecordingIndex(recordingIndexAdapter{idx: recWriter.Index(), root: cfg.Recording.StoragePath})
 		}
+		// Execute platform snapshot commands (GB/T 28181-2022 A.2.1.24):
+		// capture via the /snapshot tiers, POST each JPEG to the
+		// command's UploadURL; the library reports completion.
+		gbServer.SetSnapshotExecutor(&onvif.SnapshotUploader{SB: snapshotBuffer})
 		go func() {
 			if err := gbServer.Start(ctx); err != nil {
 				slog.Error("gb28181 server", "error", err)
