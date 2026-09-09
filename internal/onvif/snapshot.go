@@ -71,10 +71,15 @@ func (sb *SnapshotBuffer) Update(au h264.AccessUnit) {
 
 // Snapshot returns a JPEG image or raw H.264 IDR frame.
 //
-// Strategy (two-tier):
-//  1. Try rpicam-still subprocess for a real JPEG (works when camera is idle).
-//  2. Fall back to the stored H.264 IDR frame with Content-Type video/H264
-//     (works when the camera pipeline is running).
+// Strategy (three-tier, issue mibee-eye-raspi#26):
+//  1. Try rpicam-still subprocess for a real JPEG (works only when the
+//     camera is idle — under the rpicamvid streaming mode rpicam-vid owns
+//     /dev/video0 exclusively, so this tier never wins while streaming).
+//  2. Transcode the stored H.264 access unit (SPS+PPS+IDR) to a single
+//     JPEG frame via ffmpeg — always available once frames flow, and the
+//     honest image/jpeg the ONVIF GetSnapshotUri consumer expects.
+//  3. Fall back to the raw H.264 access unit with Content-Type video/H264
+//     (ffmpeg missing or the IDR undecodable — explicit for consumers).
 //
 // Returns: image bytes, MIME content type, error.
 func (sb *SnapshotBuffer) Snapshot() ([]byte, string, error) {
@@ -84,7 +89,6 @@ func (sb *SnapshotBuffer) Snapshot() ([]byte, string, error) {
 		return data, "image/jpeg", nil
 	}
 
-	// Tier 2: stored H.264 IDR frame
 	sb.mu.RLock()
 	defer sb.mu.RUnlock()
 
@@ -102,6 +106,13 @@ func (sb *SnapshotBuffer) Snapshot() ([]byte, string, error) {
 	}
 	buf.Write(sb.latestIDR)
 
+	// Tier 2: single-frame transcode of the cached access unit.
+	if data, err := h264ToJPEG(buf.Bytes()); err == nil {
+		slog.Debug("snapshot: cached IDR transcoded to JPEG via ffmpeg")
+		return data, "image/jpeg", nil
+	}
+
+	// Tier 3: raw access unit, honest content type.
 	return buf.Bytes(), "video/H264", nil
 }
 
@@ -167,6 +178,38 @@ func captureRPiCamStill() ([]byte, error) {
 		return nil, fmt.Errorf("rpicam-still: output is not JPEG (got 0x%02x 0x%02x)", data[0], data[1])
 	}
 
+	return data, nil
+}
+
+// h264ToJPEG transcodes one Annex-B H.264 access unit into a single JPEG
+// frame via the ffmpeg binary (already a device dependency for the AI
+// keyframe decoder). Errors leave the caller to the raw-IDR tier.
+func h264ToJPEG(annexB []byte) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "ffmpeg",
+		"-loglevel", "error",
+		"-f", "h264", "-i", "pipe:0",
+		"-frames:v", "1", "-q:v", "3",
+		"-f", "image2", "-c:v", "mjpeg", "pipe:1",
+	)
+	cmd.Stdin = bytes.NewReader(annexB)
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = io.Discard
+
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("ffmpeg h264->jpeg: %w", err)
+	}
+
+	data := stdout.Bytes()
+	if len(data) < 100 {
+		return nil, fmt.Errorf("ffmpeg h264->jpeg: output too small (%d bytes)", len(data))
+	}
+	if data[0] != 0xFF || data[1] != 0xD8 {
+		return nil, fmt.Errorf("ffmpeg h264->jpeg: output is not JPEG (got 0x%02x 0x%02x)", data[0], data[1])
+	}
 	return data, nil
 }
 
