@@ -364,7 +364,11 @@ func main() {
 	// --- Step 5: ONVIF Server (onvif-go/v2 transport) ---
 	// Advertises the device's own IP (localIP) in every URL: the NVR consumes
 	// XAddrs and stream URIs verbatim as this camera's endpoint.
-	onvifServer := onvifgo.New(cfg, localIP, paramManager, snapshotBuffer)
+	onvifServer, err := onvifgo.New(cfg, localIP, paramManager, snapshotBuffer)
+	if err != nil {
+		slog.Error("onvif server init", "error", err)
+		os.Exit(1)
+	}
 
 	var webServer *web.Server
 	// --- Step 5.5: Web UI Server ---

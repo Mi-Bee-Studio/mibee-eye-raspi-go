@@ -52,17 +52,20 @@ type Server struct {
 // verbatim as the host of every advertised URL (XAddrs, capabilities,
 // stream/snapshot URIs); params and snapshot back the Imaging service and
 // the /snapshot endpoint respectively.
-func New(cfg *config.Config, advertiseIP string, params *camera.ParamManager, snapshot *onvif.SnapshotBuffer) *Server {
+func New(cfg *config.Config, advertiseIP string, params *camera.ParamManager, snapshot *onvif.SnapshotBuffer) (*Server, error) {
 	s := &Server{
 		cfg:         cfg,
 		snapshot:    snapshot,
 		advertiseIP: advertiseIP,
 	}
 
-	s.libServer, _ = onvifserver.New(&onvifserver.Config{
+	libServer, err := onvifserver.New(&onvifserver.Config{
 		Host:     "0.0.0.0",
 		Port:     cfg.ONVIF.Port,
 		BasePath: "/onvif",
+		// onvif-go rc6 fail-fasts on Timeout <= 0 (its Config.Validate,
+		// issue #63) — keep the library default explicit.
+		Timeout: 30 * time.Second,
 		DeviceInfo: onvifserver.DeviceInfo{
 			Manufacturer:    cfg.Device.Manufacturer,
 			Model:           cfg.Device.Model,
@@ -94,6 +97,10 @@ func New(cfg *config.Config, advertiseIP string, params *camera.ParamManager, sn
 		onvifserver.WithStreamURIProvider(newStreamProvider(cfg.RTSP.Port)),
 		onvifserver.WithImagingProvider(&imagingProvider{pm: params}),
 	)
+	if err != nil {
+		return nil, fmt.Errorf("onvif server: %w", err)
+	}
+	s.libServer = libServer
 
 	s.soap = onvifsoap.NewHandlerWithOptions(onvifsoap.HandlerOptions{
 		Username:         cfg.ONVIF.Username,
@@ -113,7 +120,7 @@ func New(cfg *config.Config, advertiseIP string, params *camera.ParamManager, sn
 
 	s.mux = mux
 
-	return s
+	return s, nil
 }
 
 // registerActions registers every supported action on the shared SOAP
